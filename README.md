@@ -15,19 +15,142 @@ Replace this paragraph with your own summary of what your version does.
 
 ---
 
+## Stretch Features (Optional Challenges)
+
+Checklist:
+
+- [x] Challenge 1: Add Advanced Song Features with Agent Mode
+- [x] Challenge 2: Create Multiple Scoring Modes
+- [x] Challenge 3: Diversity and Fairness Logic
+- [x] Challenge 4: Visual Summary Table
+
+---
+
 ## How The System Works
 
-Explain your design in plain language.
+Real-world recommenders like Spotify or YouTube use two main strategies: **collaborative filtering** (surfacing what similar users enjoyed) and **content-based filtering** (matching song attributes to a listener's taste profile). Production systems blend both, layer in engagement signals like skip rate and repeat plays, and continuously retrain on billions of data points. This simulation focuses entirely on **content-based filtering** — no user history, no social signals. It prioritizes transparency and interpretability: every score is the direct result of a weighted math formula comparing song attributes to a user's stated preferences, so you can always trace exactly why a song ranked where it did.
 
-Some prompts to answer:
+### Song Features
 
-- What features does each `Song` use in your system
-  - For example: genre, mood, energy, tempo
-- What information does your `UserProfile` store
-- How does your `Recommender` compute a score for each song
-- How do you choose which songs to recommend
+Each `Song` object stores the following attributes:
 
-You can include a simple diagram or bullet list if helpful.
+**Core features**
+
+| Feature                 | Type        | Role in scoring                                            |
+| ----------------------- | ----------- | ---------------------------------------------------------- |
+| `genre`                 | categorical | Highest-weight match — penalizes catalog misses heavily    |
+| `mood`                  | categorical | Second categorical signal for emotional context            |
+| `energy`                | float (0–1) | Core numeric vibe driver; rewards closeness to user target |
+| `valence`               | float (0–1) | Musical positivity — separates bright from dark/moody      |
+| `acousticness`          | float (0–1) | Texture preference; organic vs. electronic feel            |
+| `tempo_bpm`             | float       | Secondary rhythm signal; normalized before scoring         |
+| `danceability`          | float (0–1) | Partially redundant with energy; low weight                |
+| `id`, `title`, `artist` | metadata    | Display only — not used in scoring                         |
+
+**Advanced features** *(Challenge 1)*
+
+| Feature            | Type        | Role in scoring                                                        |
+| ------------------ | ----------- | ---------------------------------------------------------------------- |
+| `popularity`       | int (0–100) | Normalized to 0–1; penalizes mainstream vs. niche preference gaps      |
+| `release_decade`   | int         | Era preference; normalized 1960–2020 before differencing               |
+| `liveness`         | float (0–1) | Studio polish vs. raw live recording feel                              |
+| `instrumentalness` | float (0–1) | Vocal presence; 0 = fully vocal, 1 = fully instrumental                |
+| `speechiness`      | float (0–1) | Spoken word content; separates rap/podcast-style tracks from pure music |
+
+### UserProfile Features
+
+Each `UserProfile` stores:
+
+**Core preferences**
+
+- `genre` — the genre the system treats as the user's primary identity
+- `mood` — preferred emotional context (e.g., chill, intense, focused)
+- `target_energy` — desired intensity level on a 0–1 scale
+- `target_valence` — preferred emotional brightness on a 0–1 scale
+- `target_acousticness` — texture preference; 1.0 = fully acoustic, 0.0 = fully electronic
+- `target_tempo_bpm` — preferred beats per minute; normalized to 0–1 before scoring
+- `target_danceability` — preferred rhythmic drive on a 0–1 scale
+
+**Advanced preferences** *(Challenge 1)*
+
+- `preferred_popularity` — target popularity on a 0–100 scale; normalized before scoring
+- `target_release_decade` — preferred release era (e.g., 1990, 2020); normalized 1960–2020
+- `target_liveness` — preference for studio-polished vs. live recording feel on a 0–1 scale
+- `target_instrumentalness` — preference for vocal vs. instrumental tracks on a 0–1 scale
+- `target_speechiness` — preference for spoken word content on a 0–1 scale
+
+Profiles are defined in `src/recipe.py` and imported into `src/main.py`.
+
+---
+
+### Algorithm Recipe
+
+The system scores every song in the catalog against the active user profile, then returns the top K by score. The full formula for a single song is:
+
+```
+score = 1.5 × (song.genre == user.genre)
+      + 2.0 × (song.mood  == user.mood)
+      + 5.0 × (1 − |song.energy            − user.target_energy|)
+      + 2.0 × (1 − |song.valence           − user.target_valence|)
+      + 1.5 × (1 − |song.acousticness      − user.target_acousticness|)
+      + 1.0 × (1 − |norm(song.bpm)         − norm(user.target_tempo_bpm)|)
+      + 1.0 × (1 − |song.danceability      − user.target_danceability|)
+      + 0.5 × (1 − |song.popularity/100    − user.preferred_popularity/100|)
+      + 0.8 × (1 − |norm(song.decade)      − norm(user.target_release_decade)|)
+      + 0.7 × (1 − |song.liveness          − user.target_liveness|)
+      + 1.0 × (1 − |song.instrumentalness  − user.target_instrumentalness|)
+      + 0.5 × (1 − |song.speechiness       − user.target_speechiness|)
+
+Maximum possible score = 17.5
+Tempo normalized:  norm(bpm)    = (bpm    − 54)   / (180 − 54)
+Decade normalized: norm(decade) = (decade − 1960) / (2020 − 1960)
+```
+
+**Weight rationale:**
+
+| Feature            | Weight | Why this value                                                                                               |
+| ------------------ | ------ | ------------------------------------------------------------------------------------------------------------ |
+| `energy`           | 5.0    | The dominant numeric axis — cleanly separates the catalog from 0.18 (classical) to 0.98 (metal).            |
+| `mood`             | 2.0    | Categorical tiebreaker; partially redundant with energy but captures emotional nuance the numbers miss.      |
+| `valence`          | 2.0    | Emotional brightness is independent of energy. A sad ballad and a chill lofi track can share similar energy. |
+| `genre`            | 1.5    | Reduced after weight-shift experiment; energy now leads, genre acts as a secondary filter.                   |
+| `acousticness`     | 1.5    | Texture preference is real but secondary to intensity and mood.                                              |
+| `instrumentalness` | 1.0    | Vocal vs. instrumental is a meaningful listening preference; weighted equally with tempo and danceability.   |
+| `tempo_bpm`        | 1.0    | Useful signal but context-dependent; genre already handles much of the tempo-range distinction.              |
+| `danceability`     | 1.0    | Most correlated with energy in this catalog. Low weight prevents double-counting intensity.                  |
+| `release_decade`   | 0.8    | Era preference is real but secondary — a 2020 lofi fan can still enjoy a 2010 lofi track.                   |
+| `liveness`         | 0.7    | Studio vs. live feel is a niche preference; meaningful but low-stakes for most listeners.                    |
+| `popularity`       | 0.5    | Mainstream vs. niche preference is a soft signal; rarely the deciding factor.                                |
+| `speechiness`      | 0.5    | Relevant mainly for distinguishing rap and podcast-style tracks; low weight for general use.                 |
+
+**Ranking rule:** Score all 20 songs, sort by score descending, apply diversity re-ranking, return the top K.
+
+**Diversity re-ranking** *(Challenge 3)*: After sorting, a greedy selection pass applies a score multiplier to any song whose artist (×0.60) or genre (×0.80) is already represented in the selected results. This prevents the top 5 from being dominated by a single artist or genre without altering the displayed scores.
+
+**Ranking strategies** *(Challenge 2)*: The active strategy can be swapped in one line in `src/main.py`. Each strategy is a full weight override defined in `src/strategies.py`:
+
+| Strategy        | What it emphasizes                                      |
+| --------------- | ------------------------------------------------------- |
+| `genre_first`   | Genre weight at 6.0 — genre match dominates             |
+| `mood_first`    | Mood (6.0) + valence (4.0) + liveness (2.5) — feel-led |
+| `energy_focused`| Energy (8.0) + tempo (3.5) + danceability (3.5) — intensity-led |
+| `era_locked`    | Release decade at 6.0 — era match dominates             |
+
+See `src/recipe.py` for the `WEIGHTS` dictionary and `src/strategies.py` for all four strategies.
+
+---
+
+### Known Biases and Limitations
+
+- **Genre over-prioritization.** Genre carries 3.0 out of 13.0 possible points — the single largest weight. A song that perfectly matches the user's energy, mood, valence, and acousticness but belongs to a different genre will always lose to a genre-matching song that only loosely fits numerically. This can bury genuinely good cross-genre recommendations.
+
+- **Mood rigidity.** Mood matching is binary: "chill" and "relaxed" score the same as "chill" vs. "metal" — zero points either way. In practice these moods are close neighbors, but the system treats them as equally wrong. A mood similarity gradient (rather than exact match) would fix this.
+
+- **Cold-start on user preferences.** The system requires the user to explicitly specify all twelve preference values. A real user rarely thinks in terms of `target_acousticness = 0.80` or `target_instrumentalness = 0.05`. Any inaccurate self-reported preference directly degrades recommendation quality.
+
+- **Catalog bias.** The 20-song catalog was hand-curated and reflects a narrow slice of genres and moods. Genres with multiple entries (lofi has 3) get more chances to score well than genres with one entry (blues, reggae, soul). This inflates recall for over-represented genres.
+
+- **Diversity enforcement is greedy, not optimal.** The diversity re-ranking pass penalizes repeated artists and genres but uses a greedy one-pass approach. It guarantees no exact duplicates in the top K but cannot guarantee the globally most diverse result set.
 
 ---
 
@@ -41,6 +164,8 @@ You can include a simple diagram or bullet list if helpful.
    python -m venv .venv
    source .venv/bin/activate      # Mac or Linux
    .venv\Scripts\activate         # Windows
+
+   ```
 
 2. Install dependencies
 
@@ -66,57 +191,48 @@ You can add more tests in `tests/test_recommender.py`.
 
 ---
 
-## Sample Recommendation Output
+## Sample Output
 
-Paste a sample of your recommender's output here as a text block so a reader can see what it produces:
+![CLI output showing top 5 recommendations for the pop/happy profile](public/Capture_CLI_Verification_Phase_3_Step_4.PNG)
 
-```
-# e.g.:
-# User profile: genre=indie, mood=chill, energy=low
-# Recommendations:
-#   1. ...
-#   2. ...
-#   3. ...
-```
+---
 
-**Screenshot or video** *(optional)*: <!-- Insert a screenshot or demo video link here -->
+## Adversarial Profile Stress Test
+
+![CLI output showing top 5 results across all five edge-case profiles](public/Capture_CLI_Stress_Test_Verification_Phase_4_Step_1.png)
+
+**Energy-Sad Clash** — Broken Hallelujah still lands #1 at 10.43 despite a brutal energy penalty. The combined 5.0 points from genre+mood was too large to overcome even with terrible numeric fit.
+
+**Impossible Combo** — Iron Curtain (metal/angry) takes #1. It couldn't match the classical genre, but it was the only song with `mood="angry"`, so its 2.0 mood bonus put it ahead of every other song competing on numerics alone. Moonlight Study (the one classical song) barely squeaks into #5 — its genre match was wiped out by terrible numeric alignment.
+
+**Lofi Numbers, Metal Label** — The most revealing result. Iron Curtain is nowhere in the top 5. The 3.0 genre bonus wasn't enough to save it because its numerics were the polar opposite of the targets. Lofi songs took the top 3 on pure numeric closeness alone — the genre weight lost.
+
+**Flat Midpoint** — Coffee Shop Stories dominates at 11.42. Being the only jazz/relaxed song meant a guaranteed 5.0 categorical head start that the mid-range numerics couldn't overcome.
+
+**Lone Wolf Genre** — Empty Glass Blues scores a perfect 13.0/13.0. The profile was tuned directly against its values, confirming the math works correctly end-to-end.
 
 ---
 
 ## Experiments You Tried
 
-Use this section to document the experiments you ran. For example:
-
-- What happened when you changed the weight on genre from 2.0 to 0.5
-- What happened when you added tempo or valence to the score
-- How did your system behave for different types of users
+I tested eight different user profiles — three normal ones like a pop listener, a lofi listener, and a rock listener, plus five "trick" profiles designed to break the system. The normal profiles worked about how I expected, with the right genres showing up at the top. What surprised me was how hard it was to actually fool the scoring. When I gave the system a profile that wanted high energy but a sad mood, the sad song still won because matching both the genre and the mood was worth so many points that nothing else could beat it. The most interesting result was when I set all the music preferences to match lofi songs but told the system the user wanted metal — the metal song never showed up in the top five at all, because its actual sound was so different from what the numbers described. That made me realize the genre label matters a lot less than I thought when the numbers are pulling hard in the other direction.
 
 ---
 
 ## Limitations and Risks
 
-Summarize some limitations of your recommender.
-
-Examples:
-
-- It only works on a tiny catalog
-- It does not understand lyrics or language
-- It might over favor one genre or mood
-
-You will go deeper on this in your model card.
+The catalog contains three lofi songs but only one each of blues, soul, reggae, classical, and several other genres. Because the genre bonus is awarded per matching song, a lofi listener has three opportunities to earn it while a blues listener has exactly one — meaning four of their top five results will always be genre mismatches regardless of how well their other preferences align. This is not a flaw in the scoring math itself, but a structural bias baked into the data: the catalog was built to reflect a narrow slice of listening habits, and the recommender faithfully amplifies that imbalance. In practice this means the system works best for users whose taste already overlaps with the most represented genres, and quietly under-serves everyone else. A fairer design would either balance the catalog or normalize the genre bonus by the number of songs available in each genre so that rare-genre listeners are not penalized for catalog gaps outside their control.
 
 ---
 
 ## Reflection
 
-Read and complete `model_card.md`:
+Building this made me realize how much work goes into deciding what a "good" recommendation even means. I assumed the hardest part would be writing the scoring logic, but the hardest part was actually choosing the weights — small changes to a single number could completely change which songs showed up at the top. The most surprising thing I discovered was that a song can score well for all the wrong reasons: a metal song could rank highly for a lofi listener just because its energy and tempo happen to be in the right range.
 
-[**Model Card**](model_card.md)
+The biggest learning moment was stress-testing the system and seeing how changing the weights affected the recommended songs. It was cool to see that a simple algorithm recipe could still feel like a real recommendation when everything lined up. If I kept working on this I would try implementing user feedback, to help strengthen their personal preferences, improve the recommendation algorithm, and what gets recommended to them in the future.
 
-Write 1 to 2 paragraphs here about what you learned:
+---
 
-- about how recommenders turn data into predictions
-- about where bias or unfairness could show up in systems like this
+## Model Card
 
-
-
+Refer to the Model Card below for the full write-up on sections not covered above, including intended use, how the model works, the dataset description, strengths, and future work: [**VibeMatch 1.0 - Model Card**](model_card.md)
